@@ -1,0 +1,8 @@
+[project]
+name = "ai-analytics"
+version = "0.1.0"
+description = "Governed Text2SQL analytics application"
+requires-python = ">=3.9"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

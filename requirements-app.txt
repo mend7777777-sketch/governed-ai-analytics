@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+streamlit
+requests
+certifi
+python-dotenv
+PyMySQL
+openai
+vanna
+chromadb
+pandas
+mysql-connector-python
+Faker
+argon2-cffi
+PyJWT
+pytest
+httpx

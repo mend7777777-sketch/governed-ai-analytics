@@ -1,0 +1,11 @@
+.env
+.git
+.idea
+__pycache__
+*.py[cod]
+logs
+storage
+tests
+docs
+scripts/legacy
+chroma_ai_analytics
