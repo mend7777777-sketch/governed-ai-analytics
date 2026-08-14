@@ -7,9 +7,8 @@ import os
 import re
 from typing import Any, Dict
 
-import pymysql
-
 from app.core.config import required_env
+from app.core.db import db_connection
 from app.governance.auth import Principal
 
 
@@ -22,15 +21,7 @@ class GovernanceError(ValueError):
 
 
 def _connection():
-    return pymysql.connect(
-        host=os.getenv("MYSQL_HOST", "127.0.0.1"),
-        port=int(os.getenv("MYSQL_PORT", "3306")),
-        user=required_env("MYSQL_USER"),
-        password=required_env("MYSQL_PASSWORD"),
-        database=os.getenv("MYSQL_DATABASE", "ai_analytics"),
-        ssl_disabled=True,
-        autocommit=False,
-    )
+    return db_connection()
 
 
 def _valid_table_name(table_name: str) -> str:

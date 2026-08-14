@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from typing import Any
+
+try:
+    from sqlglot import exp, parse, parse_one
+    from sqlglot.errors import ParseError
+except ImportError:  # pragma: no cover - compatibility for an un-updated local environment
+    exp = None
+    parse = parse_one = None
+    ParseError = Exception
 
 from app.integrations.vanna_client import AnalyticsVanna, connect_mysql
 from app.governance.auth import Principal
@@ -18,7 +27,9 @@ MAX_RESULT_ROWS = 200
 logger = logging.getLogger("ai_analytics.audit")
 FORBIDDEN_SQL = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|REPLACE|GRANT|REVOKE|"
-    r"CALL|EXEC|SET|USE|INTO\s+OUTFILE|LOAD\s+DATA)\b",
+    r"CALL|EXEC|SET|USE|INTO\s+(?:OUTFILE|DUMPFILE)|LOAD\s+DATA|"
+    r"FOR\s+UPDATE|LOCK\s+IN\s+SHARE\s+MODE|LOAD_FILE|GET_LOCK|RELEASE_LOCK|"
+    r"SLEEP|BENCHMARK)\b",
     re.IGNORECASE,
 )
 
@@ -41,23 +52,76 @@ def validate_read_only_sql(sql: str, allowed_tables: set[str]) -> str:
     if not normalized:
         raise QueryValidationError("模型没有返回 SQL，请换一种问法。")
 
-    # A trailing semicolon is harmless, but multiple statements are not allowed.
+    # A trailing semicolon is harmless, but multiple statements are not allowed
+    # even when the optional AST dependency is not installed yet.
     statements = [part.strip() for part in normalized.split(";") if part.strip()]
     if len(statements) != 1:
         raise QueryValidationError("一次只能执行一条只读 SQL。")
     normalized = statements[0]
-
     if "--" in normalized or "/*" in normalized:
         raise QueryValidationError("SQL 不允许包含注释。")
-    if not normalized.upper().startswith(("SELECT", "WITH")):
-        raise QueryValidationError("仅允许执行 SELECT 或 WITH 开头的只读 SQL。")
     if FORBIDDEN_SQL.search(normalized):
         raise QueryValidationError("生成的 SQL 包含不允许的写入或管理操作。")
-    referenced_tables = set(re.findall(r"\b(?:FROM|JOIN)\s+`?([a-zA-Z_][\w]*)`?", normalized, re.IGNORECASE))
-    unknown_tables = {table.lower() for table in referenced_tables} - allowed_tables
+    if parse is not None:
+        try:
+            statements = [statement for statement in parse(normalized, read="mysql") if statement is not None]
+        except ParseError as exc:
+            raise QueryValidationError("生成的 SQL 无法解析，请换一种问法。") from exc
+        if len(statements) != 1:
+            raise QueryValidationError("一次只能执行一条只读 SQL。")
+        root = statements[0]
+        if root.__class__.__name__ not in {"Select", "Union", "Except", "Intersect"}:
+            raise QueryValidationError("仅允许执行 SELECT 或 WITH 开头的只读 SQL。")
+    elif not normalized.upper().startswith(("SELECT", "WITH")):
+        raise QueryValidationError("仅允许执行 SELECT 或 WITH 开头的只读 SQL。")
+
+    referenced_tables = extract_sql_references(normalized)
+    unknown_tables = {table.lower() for table in referenced_tables} - {table.lower() for table in allowed_tables}
     if unknown_tables:
         raise QueryValidationError(f"SQL 引用了未授权表：{', '.join(sorted(unknown_tables))}。")
     return normalized
+
+
+def extract_sql_references(sql: str) -> set[str]:
+    """Return physical table references, excluding CTE aliases."""
+    if parse_one is None:
+        return {
+            table.lower()
+            for table in re.findall(r"\b(?:FROM|JOIN)\s+`?([a-zA-Z_][\w]*)`?", sql, re.IGNORECASE)
+        }
+    try:
+        expression = parse_one(sql, read="mysql")
+    except ParseError as exc:
+        raise QueryValidationError("生成的 SQL 无法解析，请换一种问法。") from exc
+    cte_names = {cte.alias_or_name.lower() for cte in expression.find_all(exp.CTE)}
+    database_name = os.getenv("MYSQL_DATABASE", "ai_analytics").lower()
+    references: set[str] = set()
+    for table in expression.find_all(exp.Table):
+        name = table.name.lower()
+        if name in cte_names:
+            continue
+        if table.db and table.db.lower() != database_name:
+            raise QueryValidationError("SQL 不允许访问当前数据仓库之外的数据库。")
+        references.add(name)
+    return references
+
+
+def bound_read_only_sql(sql: str, max_rows: int) -> str:
+    """Add a server-side safety limit, preserving an explicit smaller LIMIT."""
+    limit = max_rows + 1
+    if parse_one is not None:
+        expression = parse_one(sql, read="mysql")
+        existing = expression.args.get("limit")
+        if existing is None:
+            expression = expression.limit(limit)
+        elif existing.expression is not None and existing.expression.is_number:
+            existing_value = int(existing.expression.this)
+            if existing_value > limit:
+                existing.set("expression", exp.Literal.number(limit))
+        return expression.sql(dialect="mysql")
+    if re.search(r"\bLIMIT\s+\d+", sql, re.IGNORECASE):
+        return sql
+    return sql.rstrip(";") + f" LIMIT {limit}"
 
 
 def suggest_chart(columns: list[str], rows: list[dict[str, Any]]) -> str:
@@ -104,7 +168,7 @@ class AnalyticsQueryService:
             if not permitted_tables:
                 raise QueryValidationError("当前没有已发布的 AI 可查询表。")
             sql = validate_read_only_sql(self.vn.generate_sql(question=question), permitted_tables)
-            referenced_tables = set(re.findall(r"\b(?:FROM|JOIN)\s+`?([a-zA-Z_][\w]*)`?", sql, re.IGNORECASE))
+            referenced_tables = extract_sql_references(sql)
             try:
                 validate_column_access(sql, {table.lower() for table in referenced_tables})
             except PermissionError as exc:
@@ -113,6 +177,7 @@ class AnalyticsQueryService:
                 sql = apply_row_filters(sql, principal, {table.lower() for table in referenced_tables})
             except PermissionError as exc:
                 raise QueryValidationError(str(exc)) from exc
+            sql = bound_read_only_sql(sql, MAX_RESULT_ROWS)
             dataframe = self.vn.run_sql(sql)
             truncated = len(dataframe) > MAX_RESULT_ROWS
             dataframe = dataframe.head(MAX_RESULT_ROWS)

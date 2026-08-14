@@ -7,18 +7,17 @@ import os
 import re
 from typing import Any, List
 
-import pymysql
-
 from app.core.config import required_env
+from app.core.db import db_connection
 from app.governance.auth import Principal
 
 
+IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+MAX_FILTER_VALUES = 1000
+
+
 def _connection():
-    return pymysql.connect(
-        host=os.getenv("MYSQL_HOST", "127.0.0.1"), port=int(os.getenv("MYSQL_PORT", "3306")),
-        user=required_env("MYSQL_USER"), password=required_env("MYSQL_PASSWORD"),
-        database=os.getenv("MYSQL_DATABASE", "ai_analytics"), ssl_disabled=True,
-    )
+    return db_connection()
 
 
 def apply_row_filters(sql: str, principal: Principal, referenced_tables: set[str]) -> str:
@@ -39,10 +38,17 @@ def apply_row_filters(sql: str, principal: Principal, referenced_tables: set[str
             filters = cur.fetchall()
     if not filters:
         return sql
+    # Applying a filter outside a limited subquery changes the meaning of the
+    # query (the limit would run before the security predicate). Reject it
+    # rather than return an incomplete result set.
+    if re.search(r"\bLIMIT\b", sql, re.IGNORECASE):
+        raise PermissionError("带行级权限的查询暂不支持显式 LIMIT，请缩小业务时间范围后重试。")
     wrapped = sql
     for table_name, column_name, values_json in filters:
+        if not IDENTIFIER.fullmatch(str(table_name)) or not IDENTIFIER.fullmatch(str(column_name)):
+            raise PermissionError("行级策略包含非法表名或字段名。")
         values = json.loads(values_json)
-        if not isinstance(values, list) or not values:
+        if not isinstance(values, list) or not values or len(values) > MAX_FILTER_VALUES:
             raise PermissionError("行级策略没有配置有效的允许值。")
         if not re.search(r"(?<![A-Za-z0-9_])`?" + re.escape(column_name) + r"`?(?![A-Za-z0-9_])", wrapped, re.IGNORECASE):
             raise PermissionError("查询未返回行级策略字段，无法安全应用数据范围限制。")

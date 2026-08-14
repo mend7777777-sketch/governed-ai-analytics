@@ -6,3 +6,8 @@
 4. Start UI: `python run_streamlit.py`
 
 Use `.env` for local credentials. Do not commit it. Logs are written to `logs/app.log`.
+
+For production, set `MYSQL_SSL_DISABLED=false` only after configuring the
+server certificate trust chain. Tune `DB_POOL_SIZE` to the number of API
+workers and database capacity; requests wait up to
+`DB_POOL_ACQUIRE_TIMEOUT_SECONDS` for a connection.

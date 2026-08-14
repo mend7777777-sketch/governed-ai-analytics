@@ -6,18 +6,19 @@ import os
 import re
 from typing import Iterable, Set
 
-import pymysql
+try:
+    from sqlglot import exp, parse_one
+except ImportError:  # pragma: no cover - compatibility for an un-updated local environment
+    exp = None
+    parse_one = None
 
 from app.core.config import required_env
+from app.core.db import db_connection
 from app.governance.auth import Principal
 
 
 def _connection():
-    return pymysql.connect(
-        host=os.getenv("MYSQL_HOST", "127.0.0.1"), port=int(os.getenv("MYSQL_PORT", "3306")),
-        user=required_env("MYSQL_USER"), password=required_env("MYSQL_PASSWORD"),
-        database=os.getenv("MYSQL_DATABASE", "ai_analytics"), ssl_disabled=True,
-    )
+    return db_connection()
 
 
 def allowed_tables(principal: Principal, published_tables: Set[str]) -> Set[str]:
@@ -65,6 +66,14 @@ def validate_column_access(sql: str, referenced_tables: Iterable[str]) -> None:
     """Reject explicit disabled columns and wildcards that could expose them."""
     disabled = blocked_columns(referenced_tables)
     if not disabled:
+        return
+    if parse_one is not None:
+        expression = parse_one(sql, read="mysql")
+        if any(isinstance(node, exp.Star) for node in expression.walk()):
+            raise PermissionError("该查询涉及受限字段，不允许使用 SELECT *。")
+        for column in expression.find_all(exp.Column):
+            if column.name.lower() in disabled:
+                raise PermissionError("SQL 引用了无权访问的敏感字段：" + column.name.lower())
         return
     if re.search(r"(?:\b\w+\.)?\*", sql):
         raise PermissionError("该查询涉及受限字段，不允许使用 SELECT *。")

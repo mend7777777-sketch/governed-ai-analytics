@@ -10,11 +10,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import jwt
-import pymysql
 from argon2 import PasswordHasher
 from dotenv import load_dotenv
 
 from app.core.config import PROJECT_ROOT, required_env
+from app.core.db import db_connection
 
 
 load_dotenv(PROJECT_ROOT / ".env")
@@ -40,11 +40,7 @@ class Principal:
 
 
 def _connection():
-    return pymysql.connect(
-        host=os.getenv("MYSQL_HOST", "127.0.0.1"), port=int(os.getenv("MYSQL_PORT", "3306")),
-        user=required_env("MYSQL_USER"), password=required_env("MYSQL_PASSWORD"),
-        database=os.getenv("MYSQL_DATABASE", "ai_analytics"), ssl_disabled=True, autocommit=False,
-    )
+    return db_connection()
 
 
 def _principal_for_user(cur, user_id: int) -> Optional[Principal]:

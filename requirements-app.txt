@@ -14,4 +14,5 @@ Faker
 argon2-cffi
 PyJWT
 pytest
+sqlglot>=26,<30
 httpx

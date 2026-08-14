@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import os
 
+import pandas as pd
 from openai import OpenAI
+import pymysql.cursors
 from vanna.legacy.chromadb import ChromaDB_VectorStore
 from vanna.legacy.openai import OpenAI_Chat
 
 from app.core.config import chroma_path, required_env
+from app.core.db import pool, query_timeout_ms
 
 
 class AnalyticsVanna(ChromaDB_VectorStore, OpenAI_Chat):
@@ -39,11 +42,19 @@ class AnalyticsVanna(ChromaDB_VectorStore, OpenAI_Chat):
 
 
 def connect_mysql(vn: AnalyticsVanna) -> None:
-    vn.connect_to_mysql(
-        host=os.getenv("MYSQL_HOST", "127.0.0.1"),
-        port=int(os.getenv("MYSQL_PORT", "3306")),
-        dbname=os.getenv("MYSQL_DATABASE", "ai_analytics"),
-        user=required_env("MYSQL_USER"),
-        password=required_env("MYSQL_PASSWORD"),
-        ssl_disabled=True,
-    )
+    """Attach Vanna's read path to the shared bounded pool."""
+
+    def run_sql_mysql(sql: str) -> pd.DataFrame:
+        with pool.connection() as connection:
+            cursor = connection.cursor(pymysql.cursors.DictCursor)
+            try:
+                # MySQL enforces this limit server-side for SELECT statements.
+                cursor.execute("SET SESSION max_execution_time=%s", (query_timeout_ms(),))
+                cursor.execute(sql)
+                rows = cursor.fetchall()
+                return pd.DataFrame(rows, columns=[description[0] for description in cursor.description or []])
+            finally:
+                cursor.close()
+
+    vn.run_sql_is_set = True
+    vn.run_sql = run_sql_mysql
