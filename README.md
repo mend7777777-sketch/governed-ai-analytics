@@ -19,12 +19,13 @@ Streamlit UI -> FastAPI -> Text2SQL service -> Vanna + ChromaDB -> MySQL
 - Metadata registration, approval, rejection, and revocation workflows.
 - Local users, departments, positions, roles, permissions, and data-access policies.
 - JWT access/refresh tokens, logout, login lockout, and IAM audit records.
+- Token-version invalidation, database-backed login rate limiting, self-service password change, and administrator password reset.
 - Streamlit pages for analytics, governance, knowledge, and system management.
 
 ## Local Run
 
 1. Create `.env` from `.env.example` and set MySQL, OpenAI-compatible API, and `JWT_SECRET` values.
-2. Execute the versioned SQL files in `scripts/migrations/` in order.
+2. Execute the versioned SQL files in `scripts/migrations/` in order. Existing installations that already ran through `011` must run `012_auth_hardening.sql` before restarting the API.
 3. Start the API:
 
 ```powershell

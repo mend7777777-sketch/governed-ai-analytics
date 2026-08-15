@@ -27,7 +27,7 @@ def test_jwt_round_trip_preserves_scope(monkeypatch):
     principal = Principal(
         2, "analyst", frozenset({"data_analyst"}), frozenset({"analytics.query"}), "sales", "manager"
     )
-    restored = decode_token(issue_token(principal))
+    restored = decode_token(issue_token(principal), validate_state=False)
     assert restored == principal
 
 

@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS iam_users (
   failed_login_attempts INT NOT NULL DEFAULT 0,
   locked_until DATETIME NULL,
   last_login_at DATETIME NULL,
+  token_version INT NOT NULL DEFAULT 0,
+  password_changed_at DATETIME NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
@@ -42,6 +44,13 @@ CREATE TABLE IF NOT EXISTS auth_refresh_tokens (
   id BIGINT AUTO_INCREMENT PRIMARY KEY, token_hash CHAR(64) NOT NULL UNIQUE, user_id BIGINT NOT NULL,
   expires_at DATETIME NOT NULL, revoked_at DATETIME NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_refresh_token_active (user_id, revoked_at, expires_at)
+);
+CREATE TABLE IF NOT EXISTS auth_rate_limits (
+  rate_key VARCHAR(255) PRIMARY KEY,
+  attempt_count INT NOT NULL DEFAULT 0,
+  window_started_at DATETIME NOT NULL,
+  blocked_until DATETIME NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
 INSERT INTO iam_roles (role_code, role_name) VALUES

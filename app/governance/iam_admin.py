@@ -6,9 +6,11 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
+import pymysql
+
 from app.core.config import required_env
 from app.core.db import db_connection
-from app.governance.auth import Principal
+from app.governance.auth import Principal, revoke_user_sessions
 from app.governance.iam import hash_password
 
 
@@ -111,6 +113,10 @@ class IAMAdminService:
                     cur.execute("UPDATE iam_users SET status=%s WHERE username=%s", (status, username))
                 if not cur.rowcount:
                     raise IAMAdminError("用户不存在。")
+                cur.execute("SELECT id FROM iam_users WHERE username=%s", (username,))
+                user_row = cur.fetchone()
+                if user_row:
+                    revoke_user_sessions(cur, user_row[0])
                 self._audit(cur, actor, "IAM_USER_STATUS_CHANGE", "iam_user", username, {"status": status})
             conn.commit()
         return {"username": username, "status": status}

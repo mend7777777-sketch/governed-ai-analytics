@@ -59,11 +59,31 @@ def test_admin_can_approve_governance_table(client, monkeypatch):
 
 
 def test_login_returns_token_pair(client, monkeypatch):
-    monkeypatch.setattr(api, "authenticate", lambda username, password: ADMIN if (username, password) == ("admin", "admin") else None)
+    monkeypatch.setattr(api, "authenticate", lambda username, password, client_ip="unknown": ADMIN if (username, password) == ("admin", "admin") else None)
     monkeypatch.setattr(api, "issue_token_pair", lambda principal: {"access_token": "access", "refresh_token": "refresh", "token_type": "bearer"})
     response = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
     assert response.status_code == 200
     assert response.json()["refresh_token"] == "refresh"
+
+
+def test_password_change_requires_login(client):
+    response = client.post(
+        "/api/auth/change-password",
+        json={"current_password": "old-password", "new_password": "new-password"},
+    )
+    assert response.status_code == 401
+
+
+def test_admin_password_reset_contract(client, monkeypatch):
+    api.app.dependency_overrides[api.require_iam_admin] = lambda: ADMIN
+    called = {}
+    monkeypatch.setattr(api, "reset_password", lambda actor, username, new_password: called.update({"username": username, "password": new_password}))
+    response = client.post(
+        "/api/iam/users/analyst/reset-password",
+        json={"new_password": "new-password"},
+    )
+    assert response.status_code == 204
+    assert called == {"username": "analyst", "password": "new-password"}
 
 
 def test_refresh_and_logout_contracts(client, monkeypatch):

@@ -6,14 +6,17 @@ import logging
 from functools import lru_cache
 from typing import Dict, List, Optional, Union
 
-from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi import Depends, FastAPI, HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.services.text2sql import EXAMPLE_QUESTIONS, AnalyticsQueryService, QueryValidationError
 from app.core.logging import configure_logging
-from app.governance.auth import Principal, authenticate, decode_token, issue_token_pair, refresh_token, revoke_refresh_token
+from app.governance.auth import (
+    Principal, authenticate, change_password, decode_token, issue_token_pair,
+    refresh_token, reset_password, revoke_refresh_token,
+)
 from app.governance.service import GovernanceError, GovernanceService
 from app.knowledge.service import KnowledgeError, KnowledgeService
 from app.governance.iam_admin import IAMAdminError, IAMAdminService
@@ -42,6 +45,15 @@ class LoginRequest(BaseModel):
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str = Field(min_length=1, max_length=4096)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
+class PasswordResetRequest(BaseModel):
+    new_password: str = Field(min_length=8, max_length=256)
 
 
 class TableRegistrationRequest(BaseModel):
@@ -118,8 +130,9 @@ def require_iam_admin(principal: Principal = Depends(current_principal)) -> Prin
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginRequest) -> Dict[str, Union[str, List[str]]]:
-    principal = authenticate(payload.username, payload.password)
+def login(payload: LoginRequest, request: Request) -> Dict[str, Union[str, List[str]]]:
+    client_ip = request.client.host if request.client else "unknown"
+    principal = authenticate(payload.username, payload.password, client_ip=client_ip)
     if principal is None:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     tokens = issue_token_pair(principal)
@@ -137,6 +150,14 @@ def refresh_access_token(payload: RefreshTokenRequest) -> dict:
 @app.post("/api/auth/logout", status_code=204)
 def logout(payload: RefreshTokenRequest) -> None:
     revoke_refresh_token(payload.refresh_token)
+
+
+@app.post("/api/auth/change-password", status_code=204)
+def change_own_password(payload: PasswordChangeRequest, principal: Principal = Depends(current_principal)) -> None:
+    try:
+        change_password(principal, payload.current_password, payload.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/api/health")
@@ -262,6 +283,14 @@ def update_iam_user_status(username: str, payload: UserStatusRequest, principal:
     try:
         return IAMAdminService().set_user_status(principal, username, payload.status)
     except IAMAdminError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/iam/users/{username}/reset-password", status_code=204)
+def reset_iam_user_password(username: str, payload: PasswordResetRequest, principal: Principal = Depends(require_iam_admin)) -> None:
+    try:
+        reset_password(principal, username, payload.new_password)
+    except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
