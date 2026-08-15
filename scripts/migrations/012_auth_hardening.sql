@@ -15,6 +15,10 @@ SET @statement = IF(@column_exists=0,
   'ALTER TABLE iam_users ADD COLUMN password_changed_at DATETIME NULL', 'SELECT 1');
 PREPARE migration_statement FROM @statement; EXECUTE migration_statement; DEALLOCATE PREPARE migration_statement;
 
+-- Invalidate tokens issued before this hardening release.
+UPDATE iam_users SET token_version=1 WHERE token_version=0;
+UPDATE auth_refresh_tokens SET revoked_at=NOW() WHERE revoked_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS auth_rate_limits (
   rate_key VARCHAR(255) PRIMARY KEY,
   attempt_count INT NOT NULL DEFAULT 0,
