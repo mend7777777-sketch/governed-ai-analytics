@@ -26,7 +26,7 @@ def test_query_requires_login(client):
 
 def test_analyst_can_query_with_permission(client, monkeypatch):
     class QueryService:
-        def query(self, question, principal):
+        def query(self, question, principal, session_id=None, context=None):
             assert principal == ANALYST
             return {"question": question, "rows": [], "columns": [], "sql": "SELECT 1"}
 

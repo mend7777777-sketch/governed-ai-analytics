@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 
 import pandas as pd
 import requests
@@ -19,6 +20,8 @@ if "refresh_token" not in st.session_state:
     st.session_state.refresh_token = None
 if "history" not in st.session_state:
     st.session_state.history = []
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
 
 def api_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {st.session_state.access_token}"}
@@ -77,7 +80,7 @@ if not st.session_state.access_token:
     st.stop()
 
 with st.sidebar:
-    page = st.radio("功能", ["智能问数", "数据治理", "知识库", "系统管理"], index=0)
+    page = st.radio("功能", ["智能问数", "查询历史", "数据治理", "知识库", "系统管理"], index=0)
     st.caption(f"当前用户：{st.session_state.get('username', '')}")
     if st.button("退出登录"):
         if st.session_state.refresh_token:
@@ -89,6 +92,25 @@ with st.sidebar:
         st.session_state.refresh_token = None
         st.session_state.history = []
         st.rerun()
+if page == "查询历史":
+    st.title("查询历史")
+    try:
+        response = requests.get(f"{API_URL}/api/query/history", headers=api_headers(), timeout=15)
+        response.raise_for_status()
+        history = response.json().get("history", [])
+        if history:
+            st.dataframe(pd.DataFrame(history), use_container_width=True, hide_index=True)
+            for item in history:
+                with st.expander(f"#{item['id']} · {item['question']}"):
+                    st.caption(f"状态：{item['status']} | 行数：{item['row_count']} | 耗时：{item['elapsed_ms']} ms")
+                    if item.get("generated_sql"):
+                        st.code(item["generated_sql"], language="sql")
+        else:
+            st.info("暂无查询历史。")
+    except requests.RequestException:
+        st.error("查询历史接口不可用，请确认已执行 013 迁移。")
+    st.stop()
+
 if page == "系统管理":
     st.title("系统管理")
     if "platform_admin" not in st.session_state.get("roles", []):
@@ -171,6 +193,24 @@ if page == "知识库":
         response.raise_for_status()
         documents = response.json().get("documents", [])
         st.dataframe(pd.DataFrame(documents), use_container_width=True, hide_index=True)
+        for document in documents:
+            actions = st.columns([5, 1, 1])
+            actions[0].caption(f"#{document['id']} v{document.get('version_no', 1)} · {document['title']} · {document['status']}")
+            if actions[1].button("重训", key=f"retrain_{document['id']}"):
+                try:
+                    result = requests.post(f"{API_URL}/api/knowledge/documents/{document['id']}/retrain", headers=api_headers(), timeout=120)
+                    result.raise_for_status()
+                    st.success("重训完成")
+                    st.rerun()
+                except requests.RequestException:
+                    st.error("重训失败")
+            if actions[2].button("删除", key=f"delete_doc_{document['id']}"):
+                try:
+                    result = requests.delete(f"{API_URL}/api/knowledge/documents/{document['id']}", headers=api_headers(), timeout=20)
+                    result.raise_for_status()
+                    st.rerun()
+                except requests.RequestException:
+                    st.error("删除失败")
     except requests.RequestException:
         st.error("知识库元数据接口不可用，请确认已执行 008 迁移。")
     st.stop()
@@ -195,6 +235,44 @@ if page == "数据治理":
                     for column, action, label in zip(cols, ["submit", "approve", "reject", "revoke"], ["提交", "通过", "驳回", "撤销"]):
                         if column.button(label, key=f"{action}_{table_name}"):
                             governance_post(f"/api/governance/tables/{table_name}/{action}", {"reason": reason})
+                    with st.expander(f"查看字段 · {table_name}"):
+                        try:
+                            column_response = requests.get(f"{API_URL}/api/governance/tables/{table_name}/columns", headers=api_headers(), timeout=15)
+                            column_response.raise_for_status()
+                            st.dataframe(pd.DataFrame(column_response.json().get("columns", [])), use_container_width=True, hide_index=True)
+                            if st.button("同步字段元数据", key=f"sync_columns_{table_name}"):
+                                sync_response = requests.post(f"{API_URL}/api/governance/tables/{table_name}/sync-columns", headers=api_headers(), timeout=20)
+                                sync_response.raise_for_status()
+                                st.success("字段元数据已同步")
+                                st.rerun()
+                        except requests.RequestException:
+                            st.error("字段元数据接口不可用")
+                st.divider()
+                st.subheader("指标口径")
+                try:
+                    metric_response = requests.get(f"{API_URL}/api/governance/metrics", headers=api_headers(), timeout=15)
+                    metric_response.raise_for_status()
+                    metrics = metric_response.json().get("metrics", [])
+                    st.dataframe(pd.DataFrame(metrics), use_container_width=True, hide_index=True)
+                except requests.RequestException:
+                    metrics = []
+                    st.error("指标接口不可用，请确认已执行 013 迁移。")
+                with st.form("create_metric"):
+                    metric_code = st.text_input("指标编码")
+                    metric_name = st.text_input("指标名称")
+                    metric_definition = st.text_area("指标口径", height=100)
+                    metric_sql = st.text_area("SQL 表达式（可选）", height=80)
+                    if st.form_submit_button("发布指标"):
+                        try:
+                            metric_response = requests.post(
+                                f"{API_URL}/api/governance/metrics", headers=api_headers(),
+                                json={"metric_code": metric_code, "metric_name": metric_name, "definition": metric_definition, "sql_expression": metric_sql or None}, timeout=120
+                            )
+                            metric_response.raise_for_status()
+                            st.success("指标已发布并训练")
+                            st.rerun()
+                        except requests.RequestException as exc:
+                            st.error(getattr(exc.response, "json", lambda: {"detail": "发布失败"})().get("detail", "发布失败") if getattr(exc, "response", None) else "发布失败")
                 st.divider()
                 st.subheader("登记新表")
                 with st.form("register_table"):
@@ -220,7 +298,13 @@ def run_question(question: str) -> None:
     with st.spinner("正在检索业务知识并生成只读 SQL..."):
         try:
             response = requests.post(
-                f"{API_URL}/api/query", json={"question": question}, headers=api_headers(), timeout=90
+                f"{API_URL}/api/query",
+                json={
+                    "question": question,
+                    "session_id": st.session_state.session_id,
+                    "context": [item["question"] for item in st.session_state.history[-3:] if "question" in item],
+                },
+                headers=api_headers(), timeout=90
             )
             response.raise_for_status()
         except requests.RequestException as exc:
@@ -264,6 +348,11 @@ for item in st.session_state.history:
         elif result["chart_type"] == "bar" and len(result["columns"]) >= 2:
             st.bar_chart(dataframe.set_index(result["columns"][0]))
         st.dataframe(dataframe, use_container_width=True, hide_index=True)
+        st.download_button(
+            "下载 CSV", dataframe.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"query_{result.get('query_id') or 'result'}.csv", mime="text/csv",
+            key=f"download_{result.get('query_id')}_{item['question']}",
+        )
         with st.expander("查看生成 SQL"):
             st.code(result["sql"], language="sql")
         st.caption(

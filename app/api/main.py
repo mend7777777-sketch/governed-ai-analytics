@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import time
+import uuid
 from functools import lru_cache
 from typing import Dict, List, Optional, Union
 
@@ -11,6 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from app.services.history import list_query_history
 from app.services.text2sql import EXAMPLE_QUESTIONS, AnalyticsQueryService, QueryValidationError
 from app.core.logging import configure_logging
 from app.governance.auth import (
@@ -20,6 +23,7 @@ from app.governance.auth import (
 from app.governance.service import GovernanceError, GovernanceService
 from app.knowledge.service import KnowledgeError, KnowledgeService
 from app.governance.iam_admin import IAMAdminError, IAMAdminService
+from app.governance.metrics import MetricError, MetricService
 
 
 configure_logging()
@@ -28,14 +32,34 @@ app = FastAPI(title="AI Analytics API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 bearer = HTTPBearer(auto_error=False)
 
 
+@app.middleware("http")
+async def request_observability(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    started_at = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("request_failed request_id=%s method=%s path=%s", request_id, request.method, request.url.path)
+        raise
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "request_complete request_id=%s method=%s path=%s status=%s elapsed_ms=%s",
+        request_id, request.method, request.url.path, response.status_code,
+        round((time.perf_counter() - started_at) * 1000),
+    )
+    return response
+
+
 class QueryRequest(BaseModel):
     question: str = Field(min_length=2, max_length=500)
+    session_id: Optional[str] = Field(default=None, max_length=128)
+    context: List[str] = Field(default_factory=list, max_length=3)
 
 
 class LoginRequest(BaseModel):
@@ -71,6 +95,13 @@ class KnowledgeDocumentRequest(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     content: str = Field(min_length=1, max_length=200000)
     document_type: str = Field(default="business_definition", max_length=64)
+
+
+class MetricDefinitionRequest(BaseModel):
+    metric_code: str = Field(min_length=2, max_length=128)
+    metric_name: str = Field(min_length=1, max_length=255)
+    definition: str = Field(min_length=1, max_length=10000)
+    sql_expression: Optional[str] = Field(default=None, max_length=10000)
 
 
 class ReferenceRequest(BaseModel):
@@ -169,6 +200,11 @@ def health() -> dict[str, str]:
     return {"status": "healthy", "data_policy": "LLM does not receive query results"}
 
 
+@app.get("/api/ready")
+def readiness() -> dict[str, str]:
+    return health()
+
+
 @app.get("/api/examples")
 def examples() -> dict[str, list[str]]:
     return {"questions": EXAMPLE_QUESTIONS}
@@ -231,6 +267,51 @@ def train_knowledge_document(payload: KnowledgeDocumentRequest, principal: Princ
     try:
         return KnowledgeService().register_and_train(get_service().vn, principal, **payload.model_dump())
     except KnowledgeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/knowledge/documents/{document_id}/retrain")
+def retrain_knowledge_document(document_id: int, principal: Principal = Depends(require_admin)) -> dict:
+    try:
+        return KnowledgeService().retrain(get_service().vn, document_id)
+    except KnowledgeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/api/knowledge/documents/{document_id}", status_code=204)
+def delete_knowledge_document(document_id: int, principal: Principal = Depends(require_admin)) -> None:
+    try:
+        KnowledgeService().delete(principal, document_id)
+    except KnowledgeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/governance/tables/{table_name}/columns")
+def governance_columns(table_name: str, _: Principal = Depends(current_principal)) -> dict:
+    try:
+        return {"columns": GovernanceService().list_columns(table_name)}
+    except GovernanceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/governance/tables/{table_name}/sync-columns")
+def sync_governance_columns(table_name: str, principal: Principal = Depends(require_admin)) -> dict:
+    try:
+        return GovernanceService().sync_columns(principal, table_name)
+    except GovernanceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/governance/metrics")
+def governance_metrics(_: Principal = Depends(current_principal)) -> dict:
+    return {"metrics": MetricService().list()}
+
+
+@app.post("/api/governance/metrics", status_code=201)
+def create_governance_metric(payload: MetricDefinitionRequest, principal: Principal = Depends(require_admin)) -> dict:
+    try:
+        return MetricService().create(get_service().vn, principal, **payload.model_dump())
+    except MetricError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
@@ -297,10 +378,15 @@ def reset_iam_user_password(username: str, payload: PasswordResetRequest, princi
 @app.post("/api/query")
 def query(payload: QueryRequest, principal: Principal = Depends(require_query_access)) -> dict:
     try:
-        return get_service().query(payload.question.strip(), principal)
+        return get_service().query(payload.question.strip(), principal, payload.session_id, payload.context)
     except QueryValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         # The raw upstream/provider exception may include sensitive connection details.
         logger.exception("Text2SQL query failed for question: %s", payload.question)
         raise HTTPException(status_code=502, detail="查询未完成，请检查问题或稍后重试。") from exc
+
+
+@app.get("/api/query/history")
+def query_history(limit: int = 50, principal: Principal = Depends(require_query_access)) -> dict:
+    return {"history": list_query_history(principal, limit)}

@@ -86,3 +86,37 @@ class GovernanceService:
                 self._audit(cur, principal, audit_action, table_name, {"status": status, "reason": reason.strip()})
             conn.commit()
         return {"table_name": table_name, "approval_status": status, "ai_query_enabled": str(enabled).lower()}
+
+    def list_columns(self, table_name: str) -> list[dict[str, Any]]:
+        table_name = _valid_table_name(table_name)
+        with _connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, "
+                    "m.business_description, m.sensitivity_level, m.ai_query_enabled "
+                    "FROM information_schema.columns c LEFT JOIN metadata_columns m "
+                    "ON m.table_name=c.table_name AND m.column_name=c.column_name "
+                    "WHERE c.table_schema=DATABASE() AND c.table_name=%s ORDER BY c.ordinal_position",
+                    (table_name,),
+                )
+                rows, columns = cur.fetchall(), [item[0] for item in cur.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def sync_columns(self, principal: Principal, table_name: str) -> dict[str, Any]:
+        table_name = _valid_table_name(table_name)
+        with _connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=%s ORDER BY ordinal_position",
+                    (table_name,),
+                )
+                columns = [row[0] for row in cur.fetchall()]
+                if not columns:
+                    raise GovernanceError("目标表不存在或没有字段。")
+                cur.executemany(
+                    "INSERT IGNORE INTO metadata_columns (table_name, column_name, business_description, sensitivity_level, ai_query_enabled) VALUES (%s,%s,NULL,'INTERNAL',TRUE)",
+                    [(table_name, column_name) for column_name in columns],
+                )
+                self._audit(cur, principal, "GOVERNANCE_COLUMNS_SYNC", table_name, {"column_count": len(columns)})
+            conn.commit()
+        return {"table_name": table_name, "column_count": len(columns)}

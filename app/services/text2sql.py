@@ -21,6 +21,7 @@ from app.integrations.vanna_client import AnalyticsVanna, connect_mysql
 from app.governance.auth import Principal
 from app.governance.data_access import allowed_tables, validate_column_access
 from app.governance.row_filter import apply_row_filters
+from app.services.history import record_query
 
 
 MAX_RESULT_ROWS = 200
@@ -160,14 +161,19 @@ class AnalyticsQueryService:
         )
         return json.loads(dataframe.to_json(orient="records", force_ascii=False, date_format="iso"))
 
-    def query(self, question: str, principal: Principal) -> dict[str, Any]:
+    def query(self, question: str, principal: Principal, session_id: str | None = None, context: list[str] | None = None) -> dict[str, Any]:
         started_at = time.perf_counter()
+        sql = None
         try:
             published_tables = self.published_tables()
             permitted_tables = allowed_tables(principal, published_tables)
             if not permitted_tables:
                 raise QueryValidationError("当前没有已发布的 AI 可查询表。")
-            sql = validate_read_only_sql(self.vn.generate_sql(question=question), permitted_tables)
+            context = [item.strip() for item in (context or []) if item and item.strip()][-3:]
+            model_question = question if not context else (
+                "参考此前对话问题：\n" + "\n".join(f"- {item}" for item in context) + "\n当前问题：\n" + question
+            )
+            sql = validate_read_only_sql(self.vn.generate_sql(question=model_question), permitted_tables)
             referenced_tables = extract_sql_references(sql)
             try:
                 validate_column_access(sql, {table.lower() for table in referenced_tables})
@@ -194,8 +200,15 @@ class AnalyticsQueryService:
             "elapsed_ms": round((time.perf_counter() - started_at) * 1000),
             "data_shared_with_llm": False,
             }
+            response["query_id"] = record_query(
+                principal, question, sql, "SUCCESS", response["row_count"], response["elapsed_ms"], session_id
+            )
             logger.info("query_success elapsed_ms=%s rows=%s sql=%r", response["elapsed_ms"], response["row_count"], sql)
             return response
         except Exception:
+            record_query(
+                principal, question, sql, "FAILED", 0,
+                round((time.perf_counter() - started_at) * 1000), session_id
+            )
             logger.exception("query_failed question=%r", question)
             raise
